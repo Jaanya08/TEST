@@ -134,4 +134,45 @@ export async function fetchMarketPrices(): Promise<MarketPrices> {
     return apiFetch<MarketPrices>('/api/market/prices');
 }
 
+// ── Auto-Trade Types & Functions ──────────────────────────────
+
+export interface AutoTradeItem {
+    buyerBuildingId: string;
+    buyerName: string;
+    sellerBuildingId: string;
+    sellerName: string;
+    sellerAddress: string;
+    deficitKwh: number;
+    surplusKwh: number;
+    tradeAmountKwh: number;
+    pricePerKwhWei: string;
+    totalPriceWei: string;
+}
+
+export interface AutoTradeCheck {
+    needed: boolean;
+    trades: AutoTradeItem[];
+    reason?: string;
+}
+
+export async function fetchAutoTradeCheck(): Promise<AutoTradeCheck> {
+    return apiFetch<AutoTradeCheck>('/api/auto-trade/check');
+}
+
+export async function postAutoTradeExecute(data: {
+    buyerBuildingId: string;
+    sellerBuildingId: string;
+    energyKwh: number;
+    txHash: string;
+    priceWei: string;
+}): Promise<{ success: boolean; trade: any }> {
+    const res = await fetch(`${API_BASE}/api/auto-trade/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error(`Auto-trade execute failed: ${res.status}`);
+    return res.json();
+}
+
 export { API_BASE };

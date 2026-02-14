@@ -2,9 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { fetchBuildings, fetchGridOverview, API_BASE } from '../services/api';
 import {
     Battery, Activity, CheckCircle2, AlertCircle,
-    Loader2, Zap, Building2
+    Loader2, Zap, Building2, Power, ExternalLink,
+    Shield, Clock
 } from 'lucide-react';
 import { ethers } from "ethers";
+import { useAutoTrade } from '../hooks/useAutoTrade';
+import type { AutoTradeStatus } from '../hooks/useAutoTrade';
 
 /* ========================= */
 /* CONTRACT CONFIG */
@@ -67,11 +70,27 @@ const mockOffers: EnergyOffer[] = [
     { id: 'b5', source: 'Building 5', type: 'P2P', amount: 20.4, price: 0.14 },
 ];
 
+/* ========================= */
+/* STATUS HELPER              */
+/* ========================= */
+
+const STATUS_CONFIG: Record<AutoTradeStatus, { label: string; color: string; pulse: boolean }> = {
+    'idle': { label: 'MONITORING', color: 'var(--color-positive)', pulse: true },
+    'paused': { label: 'PAUSED', color: 'var(--color-text-muted)', pulse: false },
+    'checking': { label: 'SCANNING...', color: 'var(--color-accent)', pulse: true },
+    'trade-detected': { label: 'TRADE DETECTED', color: 'var(--color-warning)', pulse: true },
+    'awaiting-wallet': { label: 'AWAITING METAMASK', color: '#a78bfa', pulse: true },
+    'confirming': { label: 'CONFIRMING ON-CHAIN', color: 'var(--color-accent)', pulse: true },
+    'completed': { label: 'TRADE COMPLETE', color: 'var(--color-positive)', pulse: false },
+    'error': { label: 'ERROR', color: 'var(--color-negative)', pulse: false },
+    'cooldown': { label: 'COOLDOWN', color: 'var(--color-warning)', pulse: false },
+};
+
 const Trading: React.FC = () => {
     // --- STATE ---
     const [offers, setOffers] = useState<EnergyOffer[]>(mockOffers);
     const [offerStatus, setOfferStatus] = useState<Record<string, 'idle' | 'processing' | 'completed'>>({});
-    const [requiredEnergy, setRequiredEnergy] = useState<number>(4.5); // Initial deficit
+    const [requiredEnergy, setRequiredEnergy] = useState<number>(0);
 
     // --- MODAL STATE ---
     const [showModal, setShowModal] = useState(false);
@@ -84,6 +103,9 @@ const Trading: React.FC = () => {
     const [centralBattery, setCentralBattery] = useState(85);
     const [gridStability, setGridStability] = useState(76);
 
+    // --- AUTO-TRADE HOOK ---
+    const autoTrade = useAutoTrade();
+
     const refreshStats = useCallback(async () => {
         try {
             const [buildings, grid] = await Promise.all([
@@ -94,6 +116,25 @@ const Trading: React.FC = () => {
             setSellers(buildings.filter(b => b.status === 'Surplus').length);
             setCentralBattery(grid.centralBattery);
             setGridStability(grid.gridStability);
+
+            // Update Building 1's deficit/surplus from real data
+            const b1 = buildings.find(b => b.id === 'B1');
+            if (b1) {
+                const deficit = b1.load - b1.solar;
+                setRequiredEnergy(deficit > 0 ? +deficit.toFixed(1) : +(deficit).toFixed(1));
+            }
+
+            // Update P2P offer amounts from live data (surplus buildings)
+            setOffers(prev => prev.map(offer => {
+                if (offer.type !== 'P2P') return offer;
+                const matchingBuilding = buildings.find(b => b.name === offer.source || `Building ${b.id.replace('B', '')}` === offer.source);
+                if (matchingBuilding && matchingBuilding.status === 'Surplus') {
+                    return { ...offer, amount: Math.max(0, +(matchingBuilding.solar - matchingBuilding.load).toFixed(1)) };
+                } else if (matchingBuilding && matchingBuilding.status === 'Deficit') {
+                    return { ...offer, amount: 0 };
+                }
+                return offer;
+            }));
         } catch (err) {
             console.warn('[Trading] API fallback:', err);
         }
@@ -200,6 +241,9 @@ const Trading: React.FC = () => {
         }
     };
 
+    // --- Auto-trade status config ---
+    const atStatus = STATUS_CONFIG[autoTrade.status];
+
     return (
         <div className="space-y-8 animate-enter relative">
             {/* Header */}
@@ -214,6 +258,205 @@ const Trading: React.FC = () => {
                     <span className="status-dot status-dot-live bg-[var(--color-positive)]" />
                     <span className="text-xs font-semibold text-[var(--color-positive)]" style={{ fontFamily: 'var(--font-mono)' }}>LIVE</span>
                 </div>
+            </div>
+
+            {/* ═══════════════════════════════════════════════════════════ */}
+            {/* AUTO-TRADE PANEL                                          */}
+            {/* ═══════════════════════════════════════════════════════════ */}
+            <div
+                className="card overflow-hidden"
+                style={{
+                    borderColor: autoTrade.enabled ? 'rgba(0,229,255,0.25)' : 'var(--color-border)',
+                    boxShadow: autoTrade.enabled ? '0 0 30px rgba(0,229,255,0.08)' : 'none',
+                    transition: 'border-color 0.4s, box-shadow 0.4s',
+                }}
+            >
+                {/* Auto-trade header */}
+                <div className="px-6 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center"
+                            style={{
+                                background: autoTrade.enabled
+                                    ? 'linear-gradient(135deg, rgba(0,229,255,0.15), rgba(0,255,163,0.1))'
+                                    : 'rgba(255,255,255,0.03)',
+                                border: `1px solid ${autoTrade.enabled ? 'rgba(0,229,255,0.3)' : 'var(--color-border)'}`,
+                            }}
+                        >
+                            <Shield size={18} style={{ color: autoTrade.enabled ? 'var(--color-accent)' : 'var(--color-text-muted)' }} />
+                        </div>
+                        <div>
+                            <h3 className="text-base font-semibold text-white">Automated Energy Trading</h3>
+                            <p className="text-[10px] text-[var(--color-text-muted)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                AUTO-DETECT DEFICIT · AUTO-SELECT BEST LENDER · SEPOLIA SETTLEMENT
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-4">
+                        {/* Status badge */}
+                        <div className="flex items-center gap-2">
+                            <span
+                                className="w-2 h-2 rounded-full"
+                                style={{
+                                    backgroundColor: atStatus.color,
+                                    animation: atStatus.pulse ? 'pulse-dot 1.5s infinite' : 'none',
+                                }}
+                            />
+                            <span className="text-[10px] font-bold tracking-wider" style={{ color: atStatus.color, fontFamily: 'var(--font-mono)' }}>
+                                {atStatus.label}
+                            </span>
+                        </div>
+
+                        {/* Toggle switch */}
+                        <button
+                            onClick={() => autoTrade.setEnabled(!autoTrade.enabled)}
+                            className="relative inline-flex items-center h-7 w-14 rounded-full transition-all duration-300 focus:outline-none"
+                            style={{
+                                backgroundColor: autoTrade.enabled ? 'rgba(0,229,255,0.25)' : 'rgba(255,255,255,0.06)',
+                                border: `1px solid ${autoTrade.enabled ? 'rgba(0,229,255,0.5)' : 'var(--color-border)'}`,
+                            }}
+                        >
+                            <span
+                                className="inline-block h-5 w-5 rounded-full transition-all duration-300 shadow-lg"
+                                style={{
+                                    transform: autoTrade.enabled ? 'translateX(30px)' : 'translateX(4px)',
+                                    backgroundColor: autoTrade.enabled ? '#00e5ff' : 'var(--color-text-muted)',
+                                    boxShadow: autoTrade.enabled ? '0 0 10px rgba(0,229,255,0.5)' : 'none',
+                                }}
+                            />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Auto-trade body — only shown when enabled */}
+                {autoTrade.enabled && (
+                    <div className="p-6">
+                        {/* Stats row */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                            <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-center">
+                                <p className="text-[9px] text-[var(--color-text-dim)] uppercase tracking-widest mb-1" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    Total Auto-Trades
+                                </p>
+                                <p className="text-2xl font-bold text-white" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    {autoTrade.stats.totalTrades}
+                                </p>
+                            </div>
+                            <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-center">
+                                <p className="text-[9px] text-[var(--color-text-dim)] uppercase tracking-widest mb-1" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    ETH Spent
+                                </p>
+                                <p className="text-2xl font-bold text-[var(--color-accent)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    {autoTrade.stats.totalEthSpent.toFixed(6)}
+                                </p>
+                            </div>
+                            <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-center">
+                                <p className="text-[9px] text-[var(--color-text-dim)] uppercase tracking-widest mb-1" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    Energy Acquired
+                                </p>
+                                <p className="text-2xl font-bold text-[var(--color-positive)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    {autoTrade.stats.totalEnergyAcquired} <span className="text-sm font-normal text-[var(--color-text-dim)]">kWh</span>
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Pending trade indicator */}
+                        {autoTrade.pendingTrade && (
+                            <div
+                                className="mb-4 p-4 rounded-lg border flex items-center justify-between"
+                                style={{
+                                    background: 'linear-gradient(135deg, rgba(0,229,255,0.05), rgba(167,139,250,0.05))',
+                                    borderColor: 'rgba(0,229,255,0.3)',
+                                }}
+                            >
+                                <div className="flex items-center gap-3">
+                                    <Loader2 size={16} className="animate-spin text-[var(--color-accent)]" />
+                                    <div>
+                                        <p className="text-sm font-semibold text-white">
+                                            {autoTrade.pendingTrade.buyerName} ← {autoTrade.pendingTrade.sellerName}
+                                        </p>
+                                        <p className="text-[10px] text-[var(--color-text-muted)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                            {autoTrade.pendingTrade.tradeAmountKwh} kWh · {ethers.formatEther(BigInt(autoTrade.pendingTrade.totalPriceWei))} ETH
+                                        </p>
+                                    </div>
+                                </div>
+                                <span className="text-[10px] font-bold tracking-wider text-[var(--color-accent)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    {autoTrade.status === 'awaiting-wallet' ? 'CONFIRM IN METAMASK' : 'CONFIRMING ON-CHAIN...'}
+                                </span>
+                            </div>
+                        )}
+
+                        {/* Error message */}
+                        {autoTrade.errorMessage && (
+                            <div className="mb-4 p-3 rounded-lg border border-[rgba(248,113,113,0.3)] bg-[rgba(248,113,113,0.05)] flex items-center gap-2">
+                                <AlertCircle size={14} className="text-[var(--color-negative)]" />
+                                <p className="text-xs text-[var(--color-negative)]">{autoTrade.errorMessage}</p>
+                            </div>
+                        )}
+
+                        {/* Activity log */}
+                        <div>
+                            <div className="flex items-center justify-between mb-3">
+                                <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                                    <Clock size={14} className="text-[var(--color-text-muted)]" />
+                                    Activity Log
+                                </h4>
+                                <span className="text-[10px] text-[var(--color-text-dim)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                    {autoTrade.log.length} ENTRIES
+                                </span>
+                            </div>
+
+                            {autoTrade.log.length === 0 ? (
+                                <div className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-6 text-center">
+                                    <Power size={20} className="mx-auto mb-2 text-[var(--color-text-dim)]" />
+                                    <p className="text-xs text-[var(--color-text-muted)]">No auto-trades yet. Monitoring for deficit buildings...</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2 max-h-60 overflow-y-auto pr-1" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--color-border) transparent' }}>
+                                    {autoTrade.log.map(entry => (
+                                        <div
+                                            key={entry.id}
+                                            className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-3 flex items-center justify-between hover:border-[var(--color-accent)] transition-colors"
+                                            style={{ transition: 'border-color 0.2s' }}
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-7 h-7 rounded-md flex items-center justify-center ${entry.status === 'success'
+                                                    ? 'bg-[rgba(52,211,153,0.1)] text-[var(--color-positive)]'
+                                                    : 'bg-[rgba(248,113,113,0.1)] text-[var(--color-negative)]'
+                                                    }`}>
+                                                    {entry.status === 'success' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
+                                                </div>
+                                                <div>
+                                                    <p className="text-xs font-semibold text-white">
+                                                        {entry.buyerName} ← {entry.sellerName}
+                                                    </p>
+                                                    <p className="text-[10px] text-[var(--color-text-muted)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                                        {entry.energyKwh} kWh · {entry.ethSpent} ETH
+                                                        {entry.error && <span className="text-[var(--color-negative)] ml-2">({entry.error.slice(0, 40)})</span>}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div className="text-right flex items-center gap-3">
+                                                <span className="text-[10px] text-[var(--color-text-dim)]" style={{ fontFamily: 'var(--font-mono)' }}>
+                                                    {entry.timestamp.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}
+                                                </span>
+                                                {entry.txHash && (
+                                                    <a
+                                                        href={`https://sepolia.etherscan.io/tx/${entry.txHash}`}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-[var(--color-accent)] hover:text-[#33e0ff] transition-colors"
+                                                    >
+                                                        <ExternalLink size={12} />
+                                                    </a>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* B1 Status Banner */}

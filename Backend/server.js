@@ -42,14 +42,59 @@ const BUILDING_META = {
     B5: { name: 'Guesthouse / EV Station', btype: 'Commercial Large' },
 };
 
-// Static fallback data (used when generator hasn't sent data yet)
-const FALLBACK_BUILDINGS = [
-    { id: 'B1', name: 'Main Admin Block', solar: 120, load: 85, battery: 78, status: 'Surplus' },
-    { id: 'B2', name: 'Research Lab', solar: 45, load: 150, battery: 45, status: 'Deficit' },
-    { id: 'B3', name: 'Student Dorms', solar: 80, load: 60, battery: 92, status: 'Surplus' },
-    { id: 'B4', name: 'Cafeteria', solar: 30, load: 45, battery: 20, status: 'Deficit' },
-    { id: 'B5', name: 'Guesthouse / EV Station', solar: 60, load: 40, battery: 85, status: 'Surplus' },
+// Static fallback data (base values, used when generator hasn't sent data yet)
+const FALLBACK_BUILDINGS_BASE = [
+    { id: 'B1', name: 'Main Admin Block', baseSolar: 85, baseLoad: 85, baseBattery: 60 },
+    { id: 'B2', name: 'Research Lab', baseSolar: 45, baseLoad: 120, baseBattery: 45 },
+    { id: 'B3', name: 'Student Dorms', baseSolar: 80, baseLoad: 55, baseBattery: 85 },
+    { id: 'B4', name: 'Cafeteria', baseSolar: 35, baseLoad: 50, baseBattery: 30 },
+    { id: 'B5', name: 'Guesthouse / EV Station', baseSolar: 70, baseLoad: 40, baseBattery: 80 },
 ];
+
+/**
+ * Simulates time-varying building energy that causes buildings to
+ * periodically enter deficit. Each building has a different oscillation
+ * phase so they don't all flip at the same time.
+ */
+function getSimulatedBuildings() {
+    const t = Date.now() / 1000; // seconds since epoch
+    return FALLBACK_BUILDINGS_BASE.map((b, i) => {
+        // Each building oscillates with different period and phase
+        const phase = i * 1.3;  // offset each building
+        const period = 40 + i * 8; // 40-72 second cycles
+        const wave = Math.sin((t / period) + phase);
+        const wave2 = Math.cos((t / (period * 0.7)) + phase * 0.5);
+
+        // Solar varies: drops when wave is negative (simulates clouds)
+        const solar = Math.max(10, Math.round(b.baseSolar + wave * 40 + (Math.random() - 0.5) * 10));
+        // Load varies: spikes when wave2 is positive (simulates usage spikes)
+        const load = Math.max(15, Math.round(b.baseLoad + wave2 * 30 + (Math.random() - 0.5) * 8));
+        // Battery drains when in deficit
+        const battery = Math.min(100, Math.max(5, Math.round(b.baseBattery + wave * 15 + (Math.random() - 0.5) * 5)));
+        const status = solar < load ? 'Deficit' : 'Surplus';
+
+        return {
+            id: b.id,
+            name: b.name,
+            solar,
+            load,
+            battery,
+            status,
+            is_deficit: status === 'Deficit',
+            solar_kw: solar,
+            total_drained_kwh: load / 60,
+            battery_kwh: (battery / 100) * 15,
+            battery_cap: 15,
+        };
+    });
+}
+
+// Keep a static reference for compatibility (some endpoints still use this name)
+const FALLBACK_BUILDINGS = FALLBACK_BUILDINGS_BASE.map(b => ({
+    id: b.id, name: b.name,
+    solar: b.baseSolar, load: b.baseLoad, battery: b.baseBattery,
+    status: b.baseSolar >= b.baseLoad ? 'Surplus' : 'Deficit',
+}));
 
 /** Check if we have live data from the generator */
 function hasLiveData() {
@@ -149,13 +194,8 @@ app.get('/api/buildings', (_req, res) => {
         }));
         return res.json(live);
     }
-    // Fallback: add slight variation to mock data
-    const live = FALLBACK_BUILDINGS.map(b => ({
-        ...b,
-        solar: b.solar + Math.round((Math.random() - 0.5) * 10),
-        load: b.load + Math.round((Math.random() - 0.5) * 8),
-        battery: Math.min(100, Math.max(0, b.battery + Math.round((Math.random() - 0.5) * 4))),
-    }));
+    // Fallback: use time-varying simulated data
+    const live = getSimulatedBuildings();
     res.json(live);
 });
 
@@ -359,6 +399,165 @@ app.post('/api/trades', async (req, res) => {
     } catch (error) {
         console.error('Error saving trade:', error);
         res.status(500).json({ success: false, error: 'Failed to save trade' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  AUTO-TRADE SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+// Wallet addresses for each building (replace with real Sepolia addresses)
+const BUILDING_WALLETS = {
+    B1: '0x0000000000000000000000000000000000000001',
+    B2: '0x1111111111111111111111111111111111111111',
+    B3: '0x2222222222222222222222222222222222222222',
+    B4: '0x3333333333333333333333333333333333333333',
+    B5: '0x4444444444444444444444444444444444444444',
+};
+
+// Building display names for the frontend
+const BUILDING_NAMES = {
+    B1: 'Building 1',
+    B2: 'Building 2',
+    B3: 'Building 3',
+    B4: 'Building 4',
+    B5: 'Building 5',
+};
+
+// Price per kWh in Wei (0.00001 ETH)
+const PRICE_PER_KWH_WEI = '10000000000000'; // 0.00001 ETH
+
+/**
+ * GET /api/auto-trade/check
+ * 
+ * Scans all buildings. For each building in deficit, finds the building
+ * with the maximum surplus and returns a trade recommendation.
+ */
+app.get('/api/auto-trade/check', (_req, res) => {
+    try {
+        const allBuildings = hasLiveData()
+            ? Object.values(liveBuildings)
+            : getSimulatedBuildings();
+
+        // Find deficit buildings
+        const deficitBuildings = allBuildings.filter(b => b.is_deficit || b.status === 'Deficit');
+
+        // Find surplus buildings and compute surplus amount
+        const surplusBuildings = allBuildings
+            .filter(b => !b.is_deficit && b.status !== 'Deficit')
+            .map(b => ({
+                ...b,
+                surplusKwh: Math.max(0, (b.solar_kw || b.solar || 0) - (b.total_drained_kwh * 60 || b.load || 0)),
+            }))
+            .filter(b => b.surplusKwh > 0)
+            .sort((a, b_item) => b_item.surplusKwh - a.surplusKwh); // highest surplus first
+
+        if (deficitBuildings.length === 0 || surplusBuildings.length === 0) {
+            return res.json({ needed: false, trades: [], reason: 'No deficit or no surplus buildings' });
+        }
+
+        const trades = [];
+
+        for (const buyer of deficitBuildings) {
+            // Pick the seller with the highest surplus
+            const seller = surplusBuildings[0];
+            if (!seller) continue;
+
+            const deficitKwh = Math.max(0,
+                (buyer.total_drained_kwh * 60 || buyer.load || 0) -
+                (buyer.solar_kw || buyer.solar || 0)
+            );
+
+            if (deficitKwh <= 0) continue;
+
+            // Trade amount = min(deficit, seller surplus)
+            const tradeAmountKwh = Math.min(deficitKwh, seller.surplusKwh);
+            const tradeAmountInt = Math.ceil(tradeAmountKwh);
+
+            // Calculate total price in Wei
+            const totalPriceWei = (BigInt(PRICE_PER_KWH_WEI) * BigInt(tradeAmountInt)).toString();
+
+            trades.push({
+                buyerBuildingId: buyer.id,
+                buyerName: BUILDING_NAMES[buyer.id] || buyer.name || buyer.id,
+                sellerBuildingId: seller.id,
+                sellerName: BUILDING_NAMES[seller.id] || seller.name || seller.id,
+                sellerAddress: BUILDING_WALLETS[seller.id],
+                deficitKwh: +deficitKwh.toFixed(2),
+                surplusKwh: +seller.surplusKwh.toFixed(2),
+                tradeAmountKwh: tradeAmountInt,
+                pricePerKwhWei: PRICE_PER_KWH_WEI,
+                totalPriceWei,
+            });
+        }
+
+        res.json({ needed: trades.length > 0, trades });
+    } catch (err) {
+        console.error('[/api/auto-trade/check] Error:', err.message);
+        res.status(500).json({ needed: false, trades: [], error: 'Internal error' });
+    }
+});
+
+/**
+ * POST /api/auto-trade/execute
+ * 
+ * Called by the frontend after a successful on-chain transaction.
+ * Logs the trade and adjusts in-memory building energy values.
+ */
+app.post('/api/auto-trade/execute', async (req, res) => {
+    try {
+        const { buyerBuildingId, sellerBuildingId, energyKwh, txHash, priceWei } = req.body;
+
+        // Adjust in-memory live data if available
+        if (liveBuildings[sellerBuildingId]) {
+            const seller = liveBuildings[sellerBuildingId];
+            seller.solar_kw = Math.max(0, (seller.solar_kw || 0) - energyKwh);
+            seller.solar = Math.max(0, (seller.solar || 0) - Math.round(energyKwh));
+        }
+        if (liveBuildings[buyerBuildingId]) {
+            const buyer = liveBuildings[buyerBuildingId];
+            buyer.battery_kwh = Math.min(buyer.battery_cap, (buyer.battery_kwh || 0) + energyKwh);
+            buyer.battery = buyer.battery_cap > 0
+                ? Math.round((buyer.battery_kwh / buyer.battery_cap) * 100)
+                : buyer.battery;
+        }
+
+        // Create trade record
+        const newTrade = {
+            id: transactions.length + 1,
+            from: BUILDING_NAMES[sellerBuildingId] || sellerBuildingId,
+            to: BUILDING_NAMES[buyerBuildingId] || buyerBuildingId,
+            energy: energyKwh,
+            status: 'Completed',
+            time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+            txHash,
+            type: 'auto',
+        };
+        transactions.unshift(newTrade);
+        if (transactions.length > 20) transactions.pop();
+
+        // Persist to Supabase (best-effort)
+        try {
+            const { error } = await supabase
+                .from('transactions')
+                .insert([{
+                    from_entity: newTrade.from,
+                    to_entity: newTrade.to,
+                    energy_amount: energyKwh,
+                    price_per_unit: 0.00001,
+                    tx_hash: txHash,
+                    status: 'Completed',
+                    type: 'auto',
+                }]);
+            if (error) console.warn('Supabase auto-trade insert failed:', error.message);
+        } catch (err) {
+            console.warn('Supabase error:', err.message);
+        }
+
+        res.status(201).json({ success: true, trade: newTrade });
+    } catch (error) {
+        console.error('Error executing auto-trade:', error);
+        res.status(500).json({ success: false, error: 'Failed to execute auto-trade' });
     }
 });
 
