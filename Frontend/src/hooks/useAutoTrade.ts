@@ -54,11 +54,54 @@ const COOLDOWN_DURATION = 30000; // 30 seconds after each trade
 export function useAutoTrade() {
     const [enabled, setEnabled] = useState(false);
     const [status, setStatus] = useState<AutoTradeStatus>('paused');
-    const [log, setLog] = useState<AutoTradeLogEntry[]>([]);
+
+    // Seed with demo data for presentation
+    const [log, setLog] = useState<AutoTradeLogEntry[]>([
+        {
+            id: 'demo-7', timestamp: new Date(Date.now() - 30000),
+            buyerName: 'Building 1', sellerName: 'Building 3',
+            energyKwh: 8, ethSpent: '0.00008', txHash: '0xabc7...demo', status: 'success',
+        },
+        {
+            id: 'demo-6', timestamp: new Date(Date.now() - 75000),
+            buyerName: 'Building 1', sellerName: 'Building 5',
+            energyKwh: 5, ethSpent: '0.00005', txHash: '0xabc6...demo', status: 'success',
+        },
+        {
+            id: 'demo-5', timestamp: new Date(Date.now() - 120000),
+            buyerName: 'Building 2', sellerName: 'Building 1',
+            energyKwh: 12, ethSpent: '0.00012', txHash: '0xabc5...demo', status: 'success',
+        },
+        {
+            id: 'demo-4', timestamp: new Date(Date.now() - 180000),
+            buyerName: 'Building 1', sellerName: 'Central Battery',
+            energyKwh: 6, ethSpent: '0.00009', txHash: '0xabc4...demo', status: 'success',
+        },
+        {
+            id: 'demo-3a', timestamp: new Date(Date.now() - 210000),
+            buyerName: 'Building 1', sellerName: 'Main Power Grid',
+            energyKwh: 15, ethSpent: '0.00030', txHash: '0xabc3a...demo', status: 'success',
+        },
+        {
+            id: 'demo-3', timestamp: new Date(Date.now() - 240000),
+            buyerName: 'Building 4', sellerName: 'Building 1',
+            energyKwh: 3, ethSpent: '0.00003', txHash: '0xabc3...demo', status: 'success',
+        },
+        {
+            id: 'demo-2', timestamp: new Date(Date.now() - 310000),
+            buyerName: 'Building 1', sellerName: 'Building 5',
+            energyKwh: 4, ethSpent: '0.00004', txHash: '0xabc2...demo', status: 'success',
+        },
+        {
+            id: 'demo-1', timestamp: new Date(Date.now() - 400000),
+            buyerName: 'Building 1', sellerName: 'Building 3',
+            energyKwh: 4, ethSpent: '0.00004', txHash: '0xabc1...demo', status: 'success',
+        },
+    ]);
     const [stats, setStats] = useState<AutoTradeStats>({
-        totalTrades: 0,
-        totalEthSpent: 0,
-        totalEnergyAcquired: 0,
+        totalTrades: 7,
+        totalEthSpent: 0.00045,
+        totalEnergyAcquired: 42,
     });
     const [pendingTrade, setPendingTrade] = useState<AutoTradeItem | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);

@@ -430,8 +430,9 @@ const PRICE_PER_KWH_WEI = '10000000000000'; // 0.00001 ETH
 /**
  * GET /api/auto-trade/check
  * 
- * Scans all buildings. For each building in deficit, finds the building
- * with the maximum surplus and returns a trade recommendation.
+ * Only returns trades involving Building 1.
+ * When B1 is in deficit → finds the best surplus building (or Central Battery / Main Grid).
+ * When B1 is in surplus → finds a deficit building to sell to.
  */
 app.get('/api/auto-trade/check', (_req, res) => {
     try {
@@ -439,56 +440,102 @@ app.get('/api/auto-trade/check', (_req, res) => {
             ? Object.values(liveBuildings)
             : getSimulatedBuildings();
 
-        // Find deficit buildings
-        const deficitBuildings = allBuildings.filter(b => b.is_deficit || b.status === 'Deficit');
-
-        // Find surplus buildings and compute surplus amount
-        const surplusBuildings = allBuildings
-            .filter(b => !b.is_deficit && b.status !== 'Deficit')
-            .map(b => ({
-                ...b,
-                surplusKwh: Math.max(0, (b.solar_kw || b.solar || 0) - (b.total_drained_kwh * 60 || b.load || 0)),
-            }))
-            .filter(b => b.surplusKwh > 0)
-            .sort((a, b_item) => b_item.surplusKwh - a.surplusKwh); // highest surplus first
-
-        if (deficitBuildings.length === 0 || surplusBuildings.length === 0) {
-            return res.json({ needed: false, trades: [], reason: 'No deficit or no surplus buildings' });
+        const b1 = allBuildings.find(b => b.id === 'B1');
+        if (!b1) {
+            return res.json({ needed: false, trades: [], reason: 'Building 1 not found' });
         }
+
+        const b1Solar = b1.solar_kw || b1.solar || 0;
+        const b1Load = b1.total_drained_kwh ? b1.total_drained_kwh * 60 : (b1.load || 0);
+        const b1IsDeficit = b1.is_deficit || b1.status === 'Deficit' || b1Load > b1Solar;
 
         const trades = [];
 
-        for (const buyer of deficitBuildings) {
-            // Pick the seller with the highest surplus
-            const seller = surplusBuildings[0];
-            if (!seller) continue;
+        if (b1IsDeficit) {
+            // ── B1 needs energy: find the best lender ──
+            const deficitKwh = Math.max(1, Math.round(b1Load - b1Solar));
 
-            const deficitKwh = Math.max(0,
-                (buyer.total_drained_kwh * 60 || buyer.load || 0) -
-                (buyer.solar_kw || buyer.solar || 0)
-            );
+            // 1. Try surplus buildings first (P2P — cheapest)
+            const surplusBuildings = allBuildings
+                .filter(b => b.id !== 'B1' && !b.is_deficit && b.status !== 'Deficit')
+                .map(b => ({
+                    ...b,
+                    surplusKwh: Math.max(0, (b.solar_kw || b.solar || 0) - (b.total_drained_kwh ? b.total_drained_kwh * 60 : (b.load || 0))),
+                }))
+                .filter(b => b.surplusKwh > 0)
+                .sort((a, b_item) => b_item.surplusKwh - a.surplusKwh);
 
-            if (deficitKwh <= 0) continue;
+            if (surplusBuildings.length > 0) {
+                const seller = surplusBuildings[0];
+                const tradeAmountInt = Math.min(deficitKwh, Math.ceil(seller.surplusKwh));
+                const totalPriceWei = (BigInt(PRICE_PER_KWH_WEI) * BigInt(tradeAmountInt)).toString();
 
-            // Trade amount = min(deficit, seller surplus)
-            const tradeAmountKwh = Math.min(deficitKwh, seller.surplusKwh);
-            const tradeAmountInt = Math.ceil(tradeAmountKwh);
+                trades.push({
+                    buyerBuildingId: 'B1',
+                    buyerName: 'Building 1',
+                    sellerBuildingId: seller.id,
+                    sellerName: BUILDING_NAMES[seller.id] || seller.name || seller.id,
+                    sellerAddress: BUILDING_WALLETS[seller.id],
+                    deficitKwh,
+                    surplusKwh: +seller.surplusKwh.toFixed(2),
+                    tradeAmountKwh: tradeAmountInt,
+                    pricePerKwhWei: PRICE_PER_KWH_WEI,
+                    totalPriceWei,
+                    sourceType: 'P2P',
+                });
+            } else {
+                // 2. Fallback: Central Battery Storage
+                const centralBatteryKwh = 850; // simulated available kWh
+                const tradeAmountInt = Math.min(deficitKwh, centralBatteryKwh);
+                const centralPricePerKwh = '15000000000000'; // 0.000015 ETH
+                const totalPriceWei = (BigInt(centralPricePerKwh) * BigInt(tradeAmountInt)).toString();
 
-            // Calculate total price in Wei
-            const totalPriceWei = (BigInt(PRICE_PER_KWH_WEI) * BigInt(tradeAmountInt)).toString();
+                trades.push({
+                    buyerBuildingId: 'B1',
+                    buyerName: 'Building 1',
+                    sellerBuildingId: 'CENTRAL',
+                    sellerName: 'Central Battery',
+                    sellerAddress: '0x5555555555555555555555555555555555555555',
+                    deficitKwh,
+                    surplusKwh: centralBatteryKwh,
+                    tradeAmountKwh: tradeAmountInt,
+                    pricePerKwhWei: centralPricePerKwh,
+                    totalPriceWei,
+                    sourceType: 'Battery',
+                });
+            }
+        } else {
+            // ── B1 has surplus: sell to a deficit building ──
+            const surplusKwh = Math.max(1, Math.round(b1Solar - b1Load));
 
-            trades.push({
-                buyerBuildingId: buyer.id,
-                buyerName: BUILDING_NAMES[buyer.id] || buyer.name || buyer.id,
-                sellerBuildingId: seller.id,
-                sellerName: BUILDING_NAMES[seller.id] || seller.name || seller.id,
-                sellerAddress: BUILDING_WALLETS[seller.id],
-                deficitKwh: +deficitKwh.toFixed(2),
-                surplusKwh: +seller.surplusKwh.toFixed(2),
-                tradeAmountKwh: tradeAmountInt,
-                pricePerKwhWei: PRICE_PER_KWH_WEI,
-                totalPriceWei,
-            });
+            const deficitBuildings = allBuildings
+                .filter(b => b.id !== 'B1' && (b.is_deficit || b.status === 'Deficit'))
+                .map(b => ({
+                    ...b,
+                    deficitKwh: Math.max(0, (b.total_drained_kwh ? b.total_drained_kwh * 60 : (b.load || 0)) - (b.solar_kw || b.solar || 0)),
+                }))
+                .filter(b => b.deficitKwh > 0)
+                .sort((a, b_item) => b_item.deficitKwh - a.deficitKwh);
+
+            if (deficitBuildings.length > 0) {
+                const buyer = deficitBuildings[0];
+                const tradeAmountInt = Math.min(surplusKwh, Math.ceil(buyer.deficitKwh));
+                const totalPriceWei = (BigInt(PRICE_PER_KWH_WEI) * BigInt(tradeAmountInt)).toString();
+
+                trades.push({
+                    buyerBuildingId: buyer.id,
+                    buyerName: BUILDING_NAMES[buyer.id] || buyer.name || buyer.id,
+                    sellerBuildingId: 'B1',
+                    sellerName: 'Building 1',
+                    sellerAddress: BUILDING_WALLETS['B1'],
+                    deficitKwh: +buyer.deficitKwh.toFixed(2),
+                    surplusKwh: surplusKwh,
+                    tradeAmountKwh: tradeAmountInt,
+                    pricePerKwhWei: PRICE_PER_KWH_WEI,
+                    totalPriceWei,
+                    sourceType: 'P2P',
+                });
+            }
         }
 
         res.json({ needed: trades.length > 0, trades });

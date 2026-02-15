@@ -124,14 +124,21 @@ const Trading: React.FC = () => {
                 setRequiredEnergy(deficit > 0 ? +deficit.toFixed(1) : +(deficit).toFixed(1));
             }
 
-            // Update P2P offer amounts from live data (surplus buildings)
+            // Update all offers from live data
             setOffers(prev => prev.map(offer => {
-                if (offer.type !== 'P2P') return offer;
-                const matchingBuilding = buildings.find(b => b.name === offer.source || `Building ${b.id.replace('B', '')}` === offer.source);
-                if (matchingBuilding && matchingBuilding.status === 'Surplus') {
-                    return { ...offer, amount: Math.max(0, +(matchingBuilding.solar - matchingBuilding.load).toFixed(1)) };
-                } else if (matchingBuilding && matchingBuilding.status === 'Deficit') {
-                    return { ...offer, amount: 0 };
+                if (offer.type === 'Grid') {
+                    return { ...offer, amount: 9999 }; // Unlimited grid power
+                }
+                if (offer.type === 'Battery') {
+                    return { ...offer, amount: grid.centralBattery * 10 }; // 100% = 1000 kWh
+                }
+                if (offer.type === 'P2P') {
+                    const matchingBuilding = buildings.find(b => b.name === offer.source || `Building ${b.id.replace('B', '')}` === offer.source);
+                    if (matchingBuilding && matchingBuilding.status === 'Surplus') {
+                        return { ...offer, amount: Math.max(0, +(matchingBuilding.solar - matchingBuilding.load).toFixed(1)) };
+                    } else if (matchingBuilding && matchingBuilding.status === 'Deficit') {
+                        return { ...offer, amount: 0 };
+                    }
                 }
                 return offer;
             }));
